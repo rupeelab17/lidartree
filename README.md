@@ -29,13 +29,13 @@ Transpiled from the original R code by Jean-Matthieu Monnet (INRAE), GPL-3.
 cargo build --release
 
 # Run on a GeoTIFF CHM (mono-band Float32)
-cargo run --release -- CDSM_band0.tif
+cargo run --release -- CDSM_f32.tif
 
 # With custom parameters
-cargo run --release -- CDSM_band0.tif --hmin 8 --sigma 0.8 --dmin 1.0
+cargo run --release -- CDSM_f32.tif --hmin 8 --sigma 0.8 --dmin 1.0
 
 # Export crown polygons as WKT
-cargo run --release -- CDSM_band0.tif --hmin 8 --crown --output arbres.csv
+cargo run --release -- CDSM_f32.tif --hmin 8 --crown --output arbres.csv
 ```
 
 ### Input format
@@ -43,7 +43,7 @@ cargo run --release -- CDSM_band0.tif --hmin 8 --crown --output arbres.csv
 The input must be a **single-band Float32 GeoTIFF**. If your CDSM is multi-band Float64, convert it first:
 
 ```bash
-gdal_translate -b 1 -ot Float32 CDSM.tif CDSM_band0.tif
+gdal_translate -b 1 -ot Float32 CDSM.tif CDSM_f32.tif
 ```
 
 ### Output
@@ -58,10 +58,10 @@ Coordinates are in the same CRS as the input raster (e.g. EPSG:2154 Lambert-93).
 pip install geopandas matplotlib shapely pandas tifffile
 
 # Plot detected trees on the CDSM
-python plot_arbres.py arbres_detectes.csv CDSM_band0.tif
+python plot_arbres.py arbres_detectes.csv CDSM_f32.tif
 
 # Filter + save
-python plot_arbres.py arbres_detectes.csv CDSM_band0.tif --hmin 10 --save carte.png
+python plot_arbres.py arbres_detectes.csv CDSM_f32.tif --hmin 10 --save carte.png
 ```
 
 Produces 4 panels: tree map on CDSM, crown surfaces, height histogram, top-N trees + statistics.
