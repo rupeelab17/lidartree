@@ -8,3 +8,11 @@ wheels/
 
 # Virtual environments
 .venv
+
+
+/target
+Cargo.lock
+*.tif
+*.csv
+*.png
+
