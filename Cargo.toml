@@ -1,0 +1,21 @@
+[package]
+name = "lidartree"
+version = "0.1.0"
+edition = "2021"
+authors = ["Transpiled from lidaRtRee by Jean-Matthieu Monnet (INRAE)"]
+description = "Forest analysis with Airborne Laser Scanning (LiDAR) data — Rust port of the R package lidaRtRee"
+license = "GPL-3.0"
+readme = "README.md"
+
+[lib]
+name = "lidartree"
+path = "src/lib.rs"
+
+[[bin]]
+name = "lidartree-example"
+path = "src/main.rs"
+
+[dependencies]
+tiff = "0.9"
+
+[dev-dependencies]
