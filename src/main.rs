@@ -13,128 +13,46 @@ use lidartree::{
 };
 use std::env;
 use std::fs::File;
-use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
+use std::io::{BufReader, BufWriter, Write};
 
 use tiff::decoder::{Decoder, DecodingResult};
+use tiff::tags::Tag;
 
 // ==========================================================================
-// Lecture des tags GeoTIFF (ModelPixelScale + ModelTiepoint)
+// Lecture des tags GeoTIFF via le crate tiff (ModelPixelScale + ModelTiepoint)
 // ==========================================================================
 
-/// Parse les tags GeoTIFF directement depuis le fichier TIFF pour extraire
-/// la résolution et l'origine géographique.
+/// Lit la résolution et l'origine géographique depuis les tags GeoTIFF du
+/// décodeur TIFF déjà ouvert.
 ///
 /// Retourne (res_x, res_y, origin_x, origin_y).
-///
-/// Tags recherchés :
-///   - 33550 (ModelPixelScaleTag)  : 3 doubles → (scaleX, scaleY, scaleZ)
-///   - 33922 (ModelTiepointTag)    : 6 doubles → (pixCol, pixRow, pixZ, geoX, geoY, geoZ)
-fn read_geotiff_tags(path: &str) -> (f64, f64, f64, f64) {
+/// Utilise les tags ModelPixelScaleTag (33550) et ModelTiepointTag (33922).
+fn geotiff_extent_from_decoder<R: std::io::Read + std::io::Seek>(
+    decoder: &mut Decoder<R>,
+) -> (f64, f64, f64, f64) {
     let mut res_x = 1.0_f64;
     let mut res_y = 1.0_f64;
     let mut origin_x = 0.0_f64;
     let mut origin_y = 0.0_f64;
-
-    let mut file = File::open(path).unwrap_or_else(|e| {
-        eprintln!("Impossible d'ouvrir '{}' : {}", path, e);
-        std::process::exit(1);
-    });
-
-    // Lire le header TIFF pour déterminer l'endianness et l'offset de l'IFD
-    let mut header = [0u8; 8];
-    file.read_exact(&mut header).unwrap();
-
-    let little_endian = match &header[0..2] {
-        b"II" => true,
-        b"MM" => false,
-        _ => {
-            eprintln!("⚠ Pas un fichier TIFF valide, utilisation de coordonnées par défaut");
-            return (res_x, res_y, origin_x, origin_y);
-        }
-    };
-
-    let read_u16 = |buf: &[u8]| -> u16 {
-        if little_endian {
-            u16::from_le_bytes([buf[0], buf[1]])
-        } else {
-            u16::from_be_bytes([buf[0], buf[1]])
-        }
-    };
-    let read_u32 = |buf: &[u8]| -> u32 {
-        if little_endian {
-            u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]])
-        } else {
-            u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]])
-        }
-    };
-    let read_f64 = |buf: &[u8]| -> f64 {
-        if little_endian {
-            f64::from_le_bytes([
-                buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7],
-            ])
-        } else {
-            f64::from_be_bytes([
-                buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7],
-            ])
-        }
-    };
-
-    // Offset du premier IFD
-    let ifd_offset = read_u32(&header[4..8]);
-    file.seek(SeekFrom::Start(ifd_offset as u64)).unwrap();
-
-    // Nombre d'entrées dans l'IFD
-    let mut buf2 = [0u8; 2];
-    file.read_exact(&mut buf2).unwrap();
-    let num_entries = read_u16(&buf2);
-
     let mut found_scale = false;
     let mut found_tiepoint = false;
 
-    for _ in 0..num_entries {
-        let mut entry = [0u8; 12];
-        file.read_exact(&mut entry).unwrap();
-
-        let tag_id = read_u16(&entry[0..2]);
-        let _type_id = read_u16(&entry[2..4]);
-        let count = read_u32(&entry[4..8]);
-        let value_offset = read_u32(&entry[8..12]);
-
-        match tag_id {
-            33550 => {
-                // ModelPixelScaleTag : 3 doubles (scaleX, scaleY, scaleZ)
-                let pos = file.stream_position().unwrap();
-                file.seek(SeekFrom::Start(value_offset as u64)).unwrap();
-                let mut dbuf = [0u8; 24];
-                file.read_exact(&mut dbuf).unwrap();
-                res_x = read_f64(&dbuf[0..8]);
-                res_y = read_f64(&dbuf[8..16]);
-                // dbuf[16..24] = scaleZ (ignoré)
+    if let Ok(Some(scale_val)) = decoder.find_tag(Tag::ModelPixelScaleTag) {
+        if let Ok(scale) = scale_val.into_f64_vec() {
+            if scale.len() >= 2 {
+                res_x = scale[0];
+                res_y = scale[1];
                 found_scale = true;
-                file.seek(SeekFrom::Start(pos)).unwrap();
             }
-            33922 => {
-                // ModelTiepointTag : 6 doubles (pixCol, pixRow, pixZ, geoX, geoY, geoZ)
-                let pos = file.stream_position().unwrap();
-                file.seek(SeekFrom::Start(value_offset as u64)).unwrap();
-                let n_bytes = (count as usize) * 8;
-                let mut dbuf = vec![0u8; n_bytes];
-                file.read_exact(&mut dbuf).unwrap();
-                // On lit le premier tiepoint (il peut y en avoir plusieurs)
-                let _pix_col = read_f64(&dbuf[0..8]);
-                let _pix_row = read_f64(&dbuf[8..16]);
-                // dbuf[16..24] = pixZ
-                origin_x = read_f64(&dbuf[24..32]);
-                origin_y = read_f64(&dbuf[32..40]);
-                // dbuf[40..48] = geoZ
-                found_tiepoint = true;
-                file.seek(SeekFrom::Start(pos)).unwrap();
-            }
-            _ => {}
         }
-
-        if found_scale && found_tiepoint {
-            break;
+    }
+    if let Ok(Some(tie_val)) = decoder.find_tag(Tag::ModelTiepointTag) {
+        if let Ok(tie) = tie_val.into_f64_vec() {
+            if tie.len() >= 6 {
+                origin_x = tie[3];
+                origin_y = tie[4];
+                found_tiepoint = true;
+            }
         }
     }
 
@@ -171,11 +89,7 @@ fn load_geotiff(path: &str) -> Raster {
     let ncol = width as usize;
     let nrow = height as usize;
 
-    // Emprise GeoTIFF — lue depuis les tags inspectés :
-    //   ModelPixelScaleTag  (33550) : (1.0, 1.0, 0.0)
-    //   ModelTiepointTag    (33922) : (0,0,0, 379818.38, 6573607.81, 0)
-    //   CRS : EPSG:2154 (RGF93 / Lambert-93)
-    let (res_x, res_y, origin_x, origin_y) = read_geotiff_tags(path);
+    let (res_x, res_y, origin_x, origin_y) = geotiff_extent_from_decoder(&mut decoder);
 
     let xmin = origin_x;
     let ymax = origin_y;
