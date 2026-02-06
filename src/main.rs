@@ -11,10 +11,11 @@ use lidartree::{
     raster::Raster,
     tree_detection::{tree_detection, DetectedTree, TreeSegmentationParams},
 };
-use std::env;
 use std::fs::File;
-use std::io::{BufReader, BufWriter, Write};
+use std::io::{BufReader, BufWriter};
 
+use clap::Parser;
+use csv::Writer;
 use tiff::decoder::{Decoder, DecodingResult};
 use tiff::tags::Tag;
 
@@ -158,39 +159,124 @@ fn load_geotiff(path: &str) -> Raster {
 // Export CSV
 // ==========================================================================
 
-fn export_csv(trees: &[DetectedTree], path: &str, with_crown: bool) {
-    let file = File::create(path).unwrap();
-    let mut w = BufWriter::new(file);
+fn export_csv(
+    trees: &[DetectedTree],
+    path: &str,
+    with_crown: bool,
+    source_per_tree: Option<&[String]>,
+) {
+    let file = File::create(path).unwrap_or_else(|e| {
+        eprintln!("Impossible de créer '{}' : {}", path, e);
+        std::process::exit(1);
+    });
+    let mut wtr = Writer::from_writer(BufWriter::new(file));
 
+    let with_source = source_per_tree.is_some();
+    let mut header: Vec<&str> = Vec::new();
+    if with_source {
+        header.push("source");
+    }
+    header.extend(["id", "x", "y", "h", "dom_radius", "surface", "volume"]);
     if with_crown {
-        writeln!(w, "id,x,y,h,dom_radius,surface,volume,crown_wkt").unwrap();
-    } else {
-        writeln!(w, "id,x,y,h,dom_radius,surface,volume").unwrap();
+        header.push("crown_wkt");
     }
-    for t in trees {
-        if with_crown {
-            writeln!(
-                w,
-                "{},{:.2},{:.2},{:.2},{:.2},{:.1},{:.1},\"{}\"",
-                t.id,
-                t.x,
-                t.y,
-                t.h,
-                t.dom_radius,
-                t.surface,
-                t.volume,
-                t.crown_wkt.as_deref().unwrap_or("")
-            )
-            .unwrap();
-        } else {
-            writeln!(
-                w,
-                "{},{:.2},{:.2},{:.2},{:.2},{:.1},{:.1}",
-                t.id, t.x, t.y, t.h, t.dom_radius, t.surface, t.volume
-            )
-            .unwrap();
+    wtr.write_record(header).unwrap();
+
+    for (i, t) in trees.iter().enumerate() {
+        let id = t.id.to_string();
+        let x = format!("{:.2}", t.x);
+        let y = format!("{:.2}", t.y);
+        let h = format!("{:.2}", t.h);
+        let dom_radius = format!("{:.2}", t.dom_radius);
+        let surface = format!("{:.1}", t.surface);
+        let volume = format!("{:.1}", t.volume);
+        let crown = t.crown_wkt.as_deref().unwrap_or("");
+
+        let mut row: Vec<&str> = Vec::new();
+        if let Some(sources) = source_per_tree {
+            if i < sources.len() {
+                row.push(sources[i].as_str());
+            }
         }
+        row.extend([
+            id.as_str(),
+            x.as_str(),
+            y.as_str(),
+            h.as_str(),
+            dom_radius.as_str(),
+            surface.as_str(),
+            volume.as_str(),
+        ]);
+        if with_crown {
+            row.push(crown);
+        }
+        wtr.write_record(row).unwrap();
     }
+
+    wtr.flush().unwrap_or_else(|e| {
+        eprintln!("Erreur flush CSV : {}", e);
+        std::process::exit(1);
+    });
+}
+
+// ==========================================================================
+// CLI (clap)
+// ==========================================================================
+
+#[derive(Parser, Debug)]
+#[command(
+    name = "lidartree",
+    about = "Détection d'arbres sur CDSM GeoTIFF",
+    after_help = "Produit : arbres_detectes.csv — id, x, y, h, dominance, surface, volume [, crown_wkt]"
+)]
+struct Cli {
+    /// Fichier(s) CDSM GeoTIFF en entrée (un ou plusieurs)
+    #[arg(value_name = "CDSM.tif", num_args = 1..)]
+    tif_paths: Vec<String>,
+
+    /// Fichier MNT (DTM) optionnel : sélection/ajustement utilisent dem - dtm
+    #[arg(long, value_name = "DTM.tif")]
+    dtm: Option<String>,
+
+    /// Masque raster optionnel : n'extraire que les arbres dont le sommet est dans le masque
+    #[arg(long, value_name = "mask.tif")]
+    mask: Option<String>,
+
+    /// Hauteur min des arbres (m)
+    #[arg(long, default_value_t = 5.0)]
+    hmin: f64,
+
+    /// Distance dominance min (m)
+    #[arg(long, default_value_t = 0.5)]
+    dmin: f64,
+
+    /// Proportion dom/hauteur
+    #[arg(long, default_value_t = 0.0)]
+    dprop: f64,
+
+    /// Sigma lissage gaussien
+    #[arg(long, default_value_t = 0.6)]
+    sigma: f64,
+
+    /// Taille filtre médian
+    #[arg(long, default_value_t = 3)]
+    median: usize,
+
+    /// Proportion base couronne (active le calcul de couronne si présent)
+    #[arg(long, value_name = "f")]
+    crown_prop: Option<f64>,
+
+    /// Exporter les polygones couronne en WKT dans le CSV
+    #[arg(long)]
+    crown: bool,
+
+    /// Couronne en ellipse (WKT) au lieu du convexe
+    #[arg(long)]
+    crown_ellipse: bool,
+
+    /// Fichier CSV de sortie
+    #[arg(long, short, default_value = "arbres_detectes.csv")]
+    output: String,
 }
 
 // ==========================================================================
@@ -198,19 +284,10 @@ fn export_csv(trees: &[DetectedTree], path: &str, with_crown: bool) {
 // ==========================================================================
 
 fn main() {
-    let args: Vec<String> = env::args().collect();
+    let cli = Cli::parse();
 
-    if args.len() < 2 {
-        eprintln!("Usage : {} <CDSM.tif> [options]\n", args[0]);
-        eprintln!("Options :");
-        eprintln!("  --hmin <m>       Hauteur min des arbres    (défaut: 5.0)");
-        eprintln!("  --dmin <m>       Distance dominance min    (défaut: 0.5)");
-        eprintln!("  --dprop <f>      Proportion dom/hauteur    (défaut: 0.0)");
-        eprintln!("  --sigma <f>      Sigma lissage gaussien    (défaut: 0.6)");
-        eprintln!("  --median <n>     Taille filtre médian      (défaut: 3)");
-        eprintln!("  --crown-prop <f> Proportion base couronne");
-        eprintln!("  --crown          Exporter polygones WKT");
-        eprintln!("  --output <f>     Fichier CSV sortie        (défaut: arbres_detectes.csv)");
+    if cli.tif_paths.is_empty() {
+        eprintln!("Erreur : au moins un fichier CDSM.tif requis.");
         std::process::exit(1);
     }
 
@@ -218,134 +295,115 @@ fn main() {
     println!("  lidartree — Détection d'arbres sur CDSM GeoTIFF");
     println!("══════════════════════════════════════════════════════════\n");
 
-    let tif_path = &args[1];
-    let mut hmin = 5.0_f64;
-    let mut dmin = 0.5_f64;
-    let mut dprop = 0.0_f64;
-    let mut sigma = 0.6_f64;
-    let mut median_size = 3_usize;
-    let mut crown_prop: Option<f64> = None;
-    let mut compute_crown = false;
-    let mut output_csv = "arbres_detectes.csv".to_string();
+    let dtm_raster: Option<Raster> = cli.dtm.as_ref().map(|p| {
+        println!("  Chargement DTM '{}'...", p);
+        load_geotiff(p)
+    });
+    let dtm_ref = dtm_raster.as_ref();
 
-    let mut i = 2;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--hmin" => {
-                hmin = args[i + 1].parse().unwrap();
-                i += 2;
-            }
-            "--dmin" => {
-                dmin = args[i + 1].parse().unwrap();
-                i += 2;
-            }
-            "--dprop" => {
-                dprop = args[i + 1].parse().unwrap();
-                i += 2;
-            }
-            "--sigma" => {
-                sigma = args[i + 1].parse().unwrap();
-                i += 2;
-            }
-            "--median" => {
-                median_size = args[i + 1].parse().unwrap();
-                i += 2;
-            }
-            "--crown-prop" => {
-                crown_prop = Some(args[i + 1].parse().unwrap());
-                i += 2;
-            }
-            "--crown" => {
-                compute_crown = true;
-                i += 1;
-            }
-            "--output" => {
-                output_csv = args[i + 1].clone();
-                i += 2;
-            }
-            other => {
-                eprintln!("Option inconnue : {}", other);
-                std::process::exit(1);
-            }
-        }
-    }
+    let mask_raster: Option<Raster> = cli.mask.as_ref().map(|p| {
+        println!("  Chargement masque '{}'...", p);
+        load_geotiff(p)
+    });
+    let mask_ref = mask_raster.as_ref();
 
-    // ── 1. Charger le CDSM ──────────────────────────────────────────────
-    println!("1. Chargement de '{}'...", tif_path);
-    let chm = load_geotiff(tif_path);
-    println!(
-        "   {} × {} pixels  ({:.0} × {:.0} m = {:.2} ha)",
-        chm.ncol,
-        chm.nrow,
-        chm.xmax - chm.xmin,
-        chm.ymax - chm.ymin,
-        (chm.xmax - chm.xmin) * (chm.ymax - chm.ymin) / 10000.0
-    );
-    println!(
-        "   Emprise : X [{:.2} → {:.2}]  Y [{:.2} → {:.2}]",
-        chm.xmin, chm.xmax, chm.ymin, chm.ymax
-    );
-    println!("   CRS     : EPSG:2154 (RGF93 / Lambert-93)");
-
-    let valid: Vec<f64> = chm
-        .data
-        .iter()
-        .copied()
-        .filter(|v| !v.is_nan() && *v > 0.0)
-        .collect();
-    let h_max = valid.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-    let h_mean = valid.iter().sum::<f64>() / valid.len() as f64;
-    println!(
-        "   Hauteurs: moy={:.1}m  max={:.1}m  ({} px valides)\n",
-        h_mean,
-        h_max,
-        valid.len()
-    );
-
-    // ── 2. Paramètres ───────────────────────────────────────────────────
     let params = TreeSegmentationParams {
-        hmin,
-        dmin,
-        dprop,
+        hmin: cli.hmin,
+        dmin: cli.dmin,
+        dprop: cli.dprop,
         nl_filter: "Median".into(),
-        nl_size: median_size,
-        sigma: vec![(sigma, 0.0)],
-        crown_prop,
-        crown_hmin: crown_prop.map(|_| 3.0),
+        nl_size: cli.median,
+        sigma: vec![(cli.sigma, 0.0)],
+        crown_prop: cli.crown_prop,
+        crown_hmin: cli.crown_prop.map(|_| 3.0),
         ..Default::default()
     };
     println!("2. Paramètres :");
     println!(
         "   hmin={:.1}m  dmin={:.1}m  dprop={:.2}  sigma={:.2}  median={}",
-        hmin, dmin, dprop, sigma, median_size
+        cli.hmin, cli.dmin, cli.dprop, cli.sigma, cli.median
     );
-    if let Some(cp) = crown_prop {
+    if cli.dtm.is_some() {
+        println!("   DTM : oui (sélection/ajust sur dem-dtm)");
+    }
+    if cli.mask.is_some() {
+        println!("   Masque : oui");
+    }
+    if let Some(cp) = cli.crown_prop {
         println!("   crown_prop={:.2}  couronne=oui", cp);
+    }
+    if cli.crown_ellipse {
+        println!("   couronne : ellipse");
     }
     println!();
 
-    // ── 3. Détection ────────────────────────────────────────────────────
-    println!("3. Détection en cours...");
-    let t0 = std::time::Instant::now();
-    let trees = tree_detection(&chm, &params, compute_crown);
-    let dt = t0.elapsed();
-    println!(
-        "   ✓ {} arbres détectés en {:.2}s\n",
-        trees.len(),
-        dt.as_secs_f64()
-    );
+    let mut all_trees: Vec<DetectedTree> = Vec::new();
+    let mut all_sources: Vec<String> = Vec::new();
+    let mut total_ha = 0.0_f64;
 
-    // ── 4. Statistiques ─────────────────────────────────────────────────
-    if !trees.is_empty() {
-        let hs: Vec<f64> = trees.iter().map(|t| t.h).collect();
-        let ss: Vec<f64> = trees.iter().map(|t| t.surface).collect();
+    for tif_path in &cli.tif_paths {
+        println!("1. Chargement de '{}'...", tif_path);
+        let chm = load_geotiff(tif_path);
+        println!(
+            "   {} × {} pixels  ({:.0} × {:.0} m = {:.2} ha)",
+            chm.ncol,
+            chm.nrow,
+            chm.xmax - chm.xmin,
+            chm.ymax - chm.ymin,
+            (chm.xmax - chm.xmin) * (chm.ymax - chm.ymin) / 10000.0
+        );
+        total_ha += (chm.xmax - chm.xmin) * (chm.ymax - chm.ymin) / 10000.0;
+
+        if let Some(dtm) = dtm_ref {
+            if dtm.nrow != chm.nrow || dtm.ncol != chm.ncol {
+                eprintln!("   Erreur : le DTM doit avoir les mêmes dimensions que le CDSM.");
+                std::process::exit(1);
+            }
+        }
+        if let Some(mask) = mask_ref {
+            if mask.nrow != chm.nrow || mask.ncol != chm.ncol {
+                eprintln!("   Erreur : le masque doit avoir les mêmes dimensions que le CDSM.");
+                std::process::exit(1);
+            }
+        }
+
+        println!("3. Détection en cours...");
+        let t0 = std::time::Instant::now();
+        let trees = tree_detection(
+            &chm,
+            &params,
+            cli.crown,
+            dtm_ref,
+            mask_ref,
+            cli.crown_ellipse,
+        );
+        let dt = t0.elapsed();
+        println!(
+            "   ✓ {} arbres détectés en {:.2}s\n",
+            trees.len(),
+            dt.as_secs_f64()
+        );
+
+        let n = all_trees.len();
+        all_trees.extend(trees);
+        if cli.tif_paths.len() > 1 {
+            let path = tif_path.clone();
+            for _ in n..all_trees.len() {
+                all_sources.push(path.clone());
+            }
+        }
+    }
+
+    // Statistiques (sur l'ensemble si un seul fichier, sinon agrégé)
+    if !all_trees.is_empty() {
+        let hs: Vec<f64> = all_trees.iter().map(|t| t.h).collect();
+        let ss: Vec<f64> = all_trees.iter().map(|t| t.surface).collect();
         let h_min_d = hs.iter().cloned().fold(f64::INFINITY, f64::min);
         let h_max_d = hs.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
         let h_mean_d = hs.iter().sum::<f64>() / hs.len() as f64;
         let s_mean = ss.iter().sum::<f64>() / ss.len() as f64;
         let s_tot = ss.iter().sum::<f64>();
-        let area_ha = (chm.xmax - chm.xmin) * (chm.ymax - chm.ymin) / 10000.0;
-        let density = trees.len() as f64 / area_ha;
+        let density = all_trees.len() as f64 / total_ha;
 
         println!("4. Statistiques :");
         println!(
@@ -353,31 +411,15 @@ fn main() {
             h_min_d, h_mean_d, h_max_d
         );
         println!("   Surf. moy.  : {:.1} m²/arbre", s_mean);
-        println!(
-            "   Couvert     : {:.1}% de la zone",
-            s_tot / (area_ha * 10000.0) * 100.0
-        );
-        println!("   Densité     : {:.0} arbres/ha", density);
-
-        // Histogramme par classes
-        println!("\n   Classes de hauteur :");
-        for &(lo, hi) in &[
-            (0.0, 10.0),
-            (10.0, 20.0),
-            (20.0, 30.0),
-            (30.0, 40.0),
-            (40.0, 50.0),
-            (50.0, 100.0),
-        ] {
-            let n = hs.iter().filter(|h| **h >= lo && **h < hi).count();
-            if n > 0 {
-                let bar = "█".repeat(((n as f64 / trees.len() as f64) * 50.0).ceil() as usize);
-                println!("   {:>3.0}–{:<3.0}m : {:>5}  {}", lo, hi, n, bar);
-            }
+        if total_ha > 0.0 {
+            println!(
+                "   Couvert     : {:.1}% de la zone",
+                s_tot / (total_ha * 10000.0) * 100.0
+            );
+            println!("   Densité     : {:.0} arbres/ha", density);
         }
 
-        // Top 10
-        let mut sorted = trees.clone();
+        let mut sorted = all_trees.clone();
         sorted.sort_by(|a, b| b.h.partial_cmp(&a.h).unwrap());
         println!("\n   Top 10 arbres les plus hauts :");
         println!(
@@ -393,16 +435,16 @@ fn main() {
         }
     }
 
-    // ── 5. Export ───────────────────────────────────────────────────────
-    println!("\n5. Export → '{}'", output_csv);
-    export_csv(&trees, &output_csv, compute_crown);
-    println!("   {} lignes écrites.", trees.len());
+    println!("\n5. Export → '{}'", cli.output);
+    let with_source = cli.tif_paths.len() > 1 && !all_sources.is_empty();
+    export_csv(&all_trees, &cli.output, cli.crown, with_source.then(|| all_sources.as_slice()));
+    println!("   {} lignes écrites.", all_trees.len());
 
     println!("\n══════════════════════════════════════════════════════════");
     println!(
         "  ✓ Terminé — {} arbres sur {:.2} ha",
-        trees.len(),
-        (chm.xmax - chm.xmin) * (chm.ymax - chm.ymin) / 10000.0
+        all_trees.len(),
+        total_ha
     );
     println!("══════════════════════════════════════════════════════════");
 }

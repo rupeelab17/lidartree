@@ -70,6 +70,8 @@ Produces 4 panels: tree map on CDSM, crown surfaces, height histogram, top-N tre
 
 | Option | Default | Description |
 |---|---|---|
+| `--dtm <DTM.tif>` | — | Optional DTM: selection/seg_adjust use dem − dtm (canopy height) |
+| `--mask <mask.tif>` | — | Optional raster mask: only extract trees whose apex is inside mask (R: `r_mask`) |
 | `--hmin <m>` | 5.0 | Minimum tree height (m) |
 | `--dmin <m>` | 0.5 | Minimum dominance distance (m) |
 | `--dprop <f>` | 0.0 | Dominance as proportion of height |
@@ -77,7 +79,10 @@ Produces 4 panels: tree map on CDSM, crown surfaces, height histogram, top-N tre
 | `--median <n>` | 3 | Median filter kernel size (odd) |
 | `--crown-prop <f>` | — | Crown base height as proportion of apex |
 | `--crown` | off | Compute crown WKT polygons |
-| `--output <f>` | arbres_detectes.csv | Output CSV path |
+| `--crown-ellipse` | off | Crown as ellipse WKT (R: ellipses4Crown-style) instead of convex hull |
+| `-o, --output <f>` | arbres_detectes.csv | Output CSV path |
+
+You can pass **multiple CDSM files**; the CSV will include a `source` column with the file path.
 
 ## Project structure
 
@@ -90,6 +95,12 @@ src/
 └── main.rs              # CLI: load GeoTIFF → detect → export CSV
 plot_arbres.py           # Python visualization script
 ```
+
+## Documentation R (référence)
+
+- **Package** : [lidaRtRee sur CRAN](https://cran.r-project.org/package=lidaRtRee) (v4.0.x).
+- **Vignette** : [Tree segmentation](https://lidar.pages.mia.inra.fr/lidaRtRee/articles/tree.detection.html) — workflow treetop detection, segmentation, évaluation avec inventaire.
+- **Dépôt** : [forgemia.inra.fr/lidar/lidaRtRee](https://forgemia.inra.fr/lidar/lidaRtRee).
 
 ## References
 

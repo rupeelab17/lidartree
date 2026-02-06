@@ -1,10 +1,12 @@
-//! Core tree detection pipeline from lidaRtRee.
+//! Core tree detection pipeline from lidaRtRee (R).
 //!
 //! Pipeline: dem_filtering → maxima_detection → maxima_selection →
 //!           segmentation (watershed) → seg_adjust → tree_extraction
 //!
 //! The top-level function [`tree_detection`] orchestrates the full pipeline via
-//! [`tree_segmentation`] + [`tree_extraction`].
+//! [`tree_segmentation`] + [`tree_extraction`]. R equivalents: `tree_segmentation()`,
+//! `tree_extraction()`, `tree_detection()`; parameters align with R (`dmin`, `dprop`,
+//! `hmin`, `sigma`, `nl_filter`/`nl_size`, `prop`/`min.value` in seg_adjust).
 
 use crate::raster::Raster;
 use std::collections::{BinaryHeap, HashMap};
@@ -15,6 +17,10 @@ use std::cmp::Ordering;
 // ---------------------------------------------------------------------------
 
 /// A single detected tree.
+///
+/// Contains apex position, height, dominance, surface, volume, and optional crown WKT.
+/// Additional R metrics (e.g. `std_tree_metrics`, `raster_zonal_stats`) are not yet
+/// implemented; extend this struct or add a separate metrics type if needed.
 #[derive(Debug, Clone)]
 pub struct DetectedTree {
     /// Unique tree id (1-based, matching segment id).
@@ -51,6 +57,11 @@ pub struct SegmentationResult {
 }
 
 /// Parameters for the full tree segmentation pipeline.
+///
+/// Defaults match lidaRtRee (R) where applicable: `max_width` = 11, `dmin` = 0.5,
+/// `dprop` = 0, `hmin` = 5.0, `sigma` = [(0.6, 0.0)], `nl_filter` = "Median", `nl_size` = 3.
+/// R passes these via `...` to `dem_filtering` (nl_filter, nl_size, sigma),
+/// `maxima_selection` (dmin, dprop, hmin), and `seg_adjust` (prop → crown_prop, min.value → crown_hmin).
 #[derive(Debug, Clone)]
 pub struct TreeSegmentationParams {
     // -- dem_filtering --
@@ -58,14 +69,13 @@ pub struct TreeSegmentationParams {
     pub nl_filter: String,
     /// Non-linear filter kernel size (odd integer).
     pub nl_size: usize,
-    /// Gaussian sigma(s). If empty, no Gaussian smoothing.
-    /// Each entry is (sigma, height_threshold): sigma is applied to pixels
-    /// with height ≥ height_threshold.
-    /// Default: single pass with sigma=0.6 for all pixels (R default).
+    /// Gaussian sigma(s). If empty, no Gaussian smoothing. Each entry is
+    /// (sigma, height_threshold): sigma is applied to pixels with height ≥ height_threshold
+    /// (R: same behaviour in dem_filtering). Default: single pass sigma=0.6 for all pixels.
     pub sigma: Vec<(f64, f64)>,
 
-    // -- maxima_detection --
-    /// Maximum search window half-width in pixels.
+    // -- maxima_detection (R: max.width) --
+    /// Maximum search window half-width in pixels (R: `max.width`, default 11).
     pub max_width: usize,
     /// Add jitter to break ties between identical heights.
     pub jitter: bool,
@@ -78,10 +88,10 @@ pub struct TreeSegmentationParams {
     /// Minimum tree-top height (m).
     pub hmin: f64,
 
-    // -- seg_adjust --
-    /// Minimum crown base height as proportion of apex height.
+    // -- seg_adjust (R: prop, min.value) --
+    /// Minimum crown base height as proportion of apex height (R: `prop`).
     pub crown_prop: Option<f64>,
-    /// Minimum absolute crown base height.
+    /// Minimum absolute crown base height (R: `min.value`).
     pub crown_hmin: Option<f64>,
 }
 
@@ -598,8 +608,15 @@ pub fn seg_adjust(
 /// 3. `maxima_selection` (filter by height & dominance)
 /// 4. `segmentation` (seeded watershed)
 /// 5. `seg_adjust` (optional crown base clipping)
-pub fn tree_segmentation(dem: &Raster, params: &TreeSegmentationParams) -> SegmentationResult {
-    // 1. Filtering
+///
+/// If `dtm` is provided (R: `tree_segmentation(dem, dtm = ...)`), maxima detection
+/// and watershed use `dem`; selection and seg_adjust use `dem - dtm` (canopy height).
+pub fn tree_segmentation(
+    dem: &Raster,
+    params: &TreeSegmentationParams,
+    dtm: Option<&Raster>,
+) -> SegmentationResult {
+    // 1. Filtering (on dem)
     let (nl_dem, smoothed) = dem_filtering(
         dem,
         &params.nl_filter,
@@ -607,7 +624,7 @@ pub fn tree_segmentation(dem: &Raster, params: &TreeSegmentationParams) -> Segme
         &params.sigma,
     );
 
-    // Prepare filled DEM (NaN → 0, negative → 0)
+    // Filled DEM for watershed (NaN → 0, negative → 0), from dem
     let mut filled = nl_dem.clone();
     for v in filled.data.iter_mut() {
         if v.is_nan() || *v < 0.0 {
@@ -615,25 +632,39 @@ pub fn tree_segmentation(dem: &Raster, params: &TreeSegmentationParams) -> Segme
         }
     }
 
-    // 2. Maxima detection (on smoothed image)
+    // When DTM is provided, selection and seg_adjust use CHM = dem - dtm
+    let filled_chm: Raster = if let Some(dtm_r) = dtm {
+        let chm = dem.sub_raster(dtm_r);
+        let mut f = chm.clone();
+        for v in f.data.iter_mut() {
+            if v.is_nan() || *v < 0.0 {
+                *v = 0.0;
+            }
+        }
+        f
+    } else {
+        filled.clone()
+    };
+
+    // 2. Maxima detection (on smoothed dem)
     let all_maxima = maxima_detection(&smoothed, params.max_width, params.jitter);
 
-    // 3. Maxima selection
+    // 3. Maxima selection (heights from filled_chm: dem or dem-dtm)
     let selected_maxima = maxima_selection(
         &all_maxima,
-        &filled, // use filled (non-linear) for height thresholds
+        &filled_chm,
         params.dmin,
         params.dprop,
         params.hmin,
     );
 
-    // 4. Watershed segmentation
+    // 4. Watershed segmentation (on filled dem)
     let mut segs = segmentation(&selected_maxima, &filled);
 
-    // 5. Segment adjustment (crown base)
+    // 5. Segment adjustment (crown base; values from filled_chm)
     if let Some(prop) = params.crown_prop {
         let min_val = params.crown_hmin.unwrap_or(0.0);
-        segs = seg_adjust(&segs, &filled, &selected_maxima, prop, min_val);
+        segs = seg_adjust(&segs, &filled_chm, &selected_maxima, prop, min_val);
     }
 
     SegmentationResult {
@@ -652,8 +683,14 @@ pub fn tree_segmentation(dem: &Raster, params: &TreeSegmentationParams) -> Segme
 /// Extract tree attributes from segmentation results.
 ///
 /// For each segment: locates apex, computes surface, volume, and optionally
-/// builds a WKT crown polygon.
-pub fn tree_extraction(seg_result: &SegmentationResult, compute_crown: bool) -> Vec<DetectedTree> {
+/// builds a WKT crown polygon. If `mask` is provided (R: `r_mask`), only trees
+/// whose apex falls inside the mask (mask value non-zero, non-NaN) are returned.
+pub fn tree_extraction(
+    seg_result: &SegmentationResult,
+    mask: Option<&Raster>,
+    compute_crown: bool,
+    crown_ellipse: bool,
+) -> Vec<DetectedTree> {
     let segs = &seg_result.segments_id;
     let maxi = &seg_result.local_maxima;
     let dem = &seg_result.filled_dem;
@@ -695,6 +732,16 @@ pub fn tree_extraction(seg_result: &SegmentationResult, compute_crown: bool) -> 
             if seg_id == 0 {
                 continue;
             }
+            // R: r_mask — only include if apex is inside mask
+            if let Some(m) = mask {
+                if m.nrow != segs.nrow || m.ncol != segs.ncol {
+                    continue;
+                }
+                let v = m.get(r, c);
+                if v.is_nan() || v == 0.0 {
+                    continue;
+                }
+            }
             let (x, y) = segs.rc_to_xy(r, c);
             let h = dem.get(r, c);
             let dom_m = dom * segs.res_x;
@@ -704,7 +751,11 @@ pub fn tree_extraction(seg_result: &SegmentationResult, compute_crown: bool) -> 
 
             let crown_wkt = if compute_crown {
                 seg_pixels.get(&seg_id).map(|pixels| {
-                    build_crown_wkt(pixels, segs)
+                    if crown_ellipse {
+                        build_crown_wkt_ellipse(pixels, segs)
+                    } else {
+                        build_crown_wkt(pixels, segs)
+                    }
                 })
             } else {
                 None
@@ -803,18 +854,66 @@ fn cross(o: (f64, f64), a: (f64, f64), b: (f64, f64)) -> f64 {
     (a.0 - o.0) * (b.1 - o.1) - (a.1 - o.1) * (b.0 - o.0)
 }
 
+/// Build WKT polygon approximating an ellipse from segment pixels (R: ellipses4Crown-style).
+fn build_crown_wkt_ellipse(pixels: &[(usize, usize)], raster: &Raster) -> String {
+    if pixels.len() < 2 {
+        return "POLYGON EMPTY".to_string();
+    }
+    let n = pixels.len() as f64;
+    let mut sum_x = 0.0;
+    let mut sum_y = 0.0;
+    for &(r, c) in pixels {
+        let (x, y) = raster.rc_to_xy(r, c);
+        sum_x += x;
+        sum_y += y;
+    }
+    let cx = sum_x / n;
+    let cy = sum_y / n;
+    let mut var_x = 0.0;
+    let mut var_y = 0.0;
+    for &(r, c) in pixels {
+        let (x, y) = raster.rc_to_xy(r, c);
+        var_x += (x - cx) * (x - cx);
+        var_y += (y - cy) * (y - cy);
+    }
+    var_x = (var_x / n).max(raster.res_x * raster.res_x);
+    var_y = (var_y / n).max(raster.res_y * raster.res_y);
+    let semi_x = (var_x * 2.0).sqrt();
+    let semi_y = (var_y * 2.0).sqrt();
+    const N_POINTS: usize = 32;
+    let mut wkt = String::from("POLYGON((");
+    for i in 0..N_POINTS {
+        let t = (i as f64 / N_POINTS as f64) * 2.0 * std::f64::consts::PI;
+        let x = cx + semi_x * t.cos();
+        let y = cy + semi_y * t.sin();
+        if i > 0 {
+            wkt.push(',');
+        }
+        wkt.push_str(&format!("{:.1} {:.1}", x, y));
+    }
+    wkt.push_str(&format!(",{:.1} {:.1}", cx + semi_x, cy));
+    wkt.push_str("))");
+    wkt
+}
+
 // ---------------------------------------------------------------------------
 // tree_detection — top-level function
 // ---------------------------------------------------------------------------
 
 /// Full tree detection: segmentation + extraction.
 ///
-/// This is the main entry point, equivalent to R's `tree_detection()`.
+/// Main entry point, equivalent to R's `tree_detection()`. Optionally: `dtm` so
+/// that selection and seg_adjust use canopy height (dem - dtm); `mask` (R: r_mask)
+/// to restrict extraction to apices inside the mask; `crown_ellipse` for ellipse
+/// crown WKT instead of convex hull.
 pub fn tree_detection(
     dem: &Raster,
     params: &TreeSegmentationParams,
     compute_crown: bool,
+    dtm: Option<&Raster>,
+    mask: Option<&Raster>,
+    crown_ellipse: bool,
 ) -> Vec<DetectedTree> {
-    let seg_result = tree_segmentation(dem, params);
-    tree_extraction(&seg_result, compute_crown)
+    let seg_result = tree_segmentation(dem, params, dtm);
+    tree_extraction(&seg_result, mask, compute_crown, crown_ellipse)
 }

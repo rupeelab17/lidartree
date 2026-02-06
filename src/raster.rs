@@ -131,6 +131,32 @@ impl Raster {
     pub fn cell_area(&self) -> f64 {
         self.res_x * self.res_y
     }
+
+    /// Element-wise subtraction: self - other. Panics if dimensions differ.
+    pub fn sub_raster(&self, other: &Raster) -> Raster {
+        assert_eq!(self.nrow, other.nrow);
+        assert_eq!(self.ncol, other.ncol);
+        let data: Vec<f64> = self
+            .data
+            .iter()
+            .zip(other.data.iter())
+            .map(|(a, b)| {
+                if a.is_nan() || b.is_nan() {
+                    f64::NAN
+                } else {
+                    a - b
+                }
+            })
+            .collect();
+        let mut out = Raster::from_vec(self.nrow, self.ncol, data);
+        out.xmin = self.xmin;
+        out.xmax = self.xmax;
+        out.ymin = self.ymin;
+        out.ymax = self.ymax;
+        out.res_x = self.res_x;
+        out.res_y = self.res_y;
+        out
+    }
 }
 
 impl Index<(usize, usize)> for Raster {

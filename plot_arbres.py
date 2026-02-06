@@ -12,24 +12,26 @@ import argparse
 import sys
 
 import geopandas as gpd
-import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from matplotlib.patches import Patch
-from shapely.geometry import Point
 from shapely import wkt
+from shapely.geometry import Point
 
 # Optionnel : rasterio pour afficher le CDSM en fond
 try:
     import rasterio
     from rasterio.plot import show as rioshow
+
     HAS_RASTERIO = True
 except ImportError:
     HAS_RASTERIO = False
 
 try:
     import tifffile
+
     HAS_TIFFFILE = True
 except ImportError:
     HAS_TIFFFILE = False
@@ -78,7 +80,9 @@ def load_trees(csv_path):
         valid = df["crown_wkt"].notna() & (df["crown_wkt"] != "")
         if valid.any():
             crowns = df.loc[valid, "crown_wkt"].apply(wkt.loads)
-            gdf_crowns = gpd.GeoDataFrame(df[valid], geometry=crowns.values, crs="EPSG:2154")
+            gdf_crowns = gpd.GeoDataFrame(
+                df[valid], geometry=crowns.values, crs="EPSG:2154"
+            )
             return gdf, gdf_crowns
 
     return gdf, None
@@ -97,7 +101,8 @@ def plot_trees(gdf, gdf_crowns, cdsm_data, cdsm_extent, args):
     fig, axes = plt.subplots(2, 2, figsize=(16, 14))
     fig.suptitle(
         f"Détection d'arbres — {len(gdf)} arbres détectés",
-        fontsize=16, fontweight="bold"
+        fontsize=16,
+        fontweight="bold",
     )
 
     # ── 1. Carte des arbres sur le CDSM ─────────────────────────────
@@ -107,16 +112,26 @@ def plot_trees(gdf, gdf_crowns, cdsm_data, cdsm_extent, args):
     if cdsm_data is not None:
         masked = np.where(np.isnan(cdsm_data) | (cdsm_data <= 0), np.nan, cdsm_data)
         ax1.imshow(
-            masked, extent=cdsm_extent, origin="upper",
-            cmap="terrain", alpha=0.7, vmin=0, vmax=np.nanmax(masked)
+            masked,
+            extent=cdsm_extent,
+            origin="upper",
+            cmap="terrain",
+            alpha=0.7,
+            vmin=0,
+            vmax=np.nanmax(masked),
         )
 
     sc1 = ax1.scatter(
-        gdf["x"], gdf["y"],
-        c=gdf["h"], s=gdf["h"] * 1.5,
-        cmap="YlGn", edgecolors="black", linewidths=0.3,
-        vmin=gdf["h"].min(), vmax=gdf["h"].max(),
-        zorder=5
+        gdf["x"],
+        gdf["y"],
+        c=gdf["h"],
+        s=gdf["h"] * 1.5,
+        cmap="YlGn",
+        edgecolors="black",
+        linewidths=0.3,
+        vmin=gdf["h"].min(),
+        vmax=gdf["h"].max(),
+        zorder=5,
     )
     plt.colorbar(sc1, ax=ax1, label="Hauteur (m)", shrink=0.8)
     ax1.set_xlabel("X (Lambert-93)")
@@ -130,22 +145,35 @@ def plot_trees(gdf, gdf_crowns, cdsm_data, cdsm_extent, args):
     if cdsm_data is not None:
         masked = np.where(np.isnan(cdsm_data) | (cdsm_data <= 0), np.nan, cdsm_data)
         ax2.imshow(
-            masked, extent=cdsm_extent, origin="upper",
-            cmap="Greys_r", alpha=0.4, vmin=0
+            masked,
+            extent=cdsm_extent,
+            origin="upper",
+            cmap="Greys_r",
+            alpha=0.4,
+            vmin=0,
         )
 
     if gdf_crowns is not None and len(gdf_crowns) > 0:
         gdf_crowns.plot(
-            ax=ax2, column="h", cmap="YlOrRd",
-            edgecolor="black", linewidth=0.4, alpha=0.6,
-            legend=True, legend_kwds={"label": "Hauteur apex (m)", "shrink": 0.8}
+            ax=ax2,
+            column="h",
+            cmap="YlOrRd",
+            edgecolor="black",
+            linewidth=0.4,
+            alpha=0.6,
+            legend=True,
+            legend_kwds={"label": "Hauteur apex (m)", "shrink": 0.8},
         )
     else:
         sc2 = ax2.scatter(
-            gdf["x"], gdf["y"],
-            c=gdf["surface"], s=gdf["surface"] * 0.5,
-            cmap="YlOrRd", edgecolors="black", linewidths=0.3,
-            zorder=5
+            gdf["x"],
+            gdf["y"],
+            c=gdf["surface"],
+            s=gdf["surface"] * 0.5,
+            cmap="YlOrRd",
+            edgecolors="black",
+            linewidths=0.3,
+            zorder=5,
         )
         plt.colorbar(sc2, ax=ax2, label="Surface (m²)", shrink=0.8)
 
@@ -170,8 +198,18 @@ def plot_trees(gdf, gdf_crowns, cdsm_data, cdsm_extent, args):
 
     ax3.set_xlabel("Hauteur (m)")
     ax3.set_ylabel("Nombre d'arbres")
-    ax3.axvline(gdf["h"].mean(), color="red", linestyle="--", label=f"Moyenne = {gdf['h'].mean():.1f}m")
-    ax3.axvline(gdf["h"].median(), color="blue", linestyle="--", label=f"Médiane = {gdf['h'].median():.1f}m")
+    ax3.axvline(
+        gdf["h"].mean(),
+        color="red",
+        linestyle="--",
+        label=f"Moyenne = {gdf['h'].mean():.1f}m",
+    )
+    ax3.axvline(
+        gdf["h"].median(),
+        color="blue",
+        linestyle="--",
+        label=f"Médiane = {gdf['h'].median():.1f}m",
+    )
     ax3.legend()
 
     # ── 4. Top N arbres + stats ──────────────────────────────────────
@@ -180,9 +218,11 @@ def plot_trees(gdf, gdf_crowns, cdsm_data, cdsm_extent, args):
 
     top = gdf.nlargest(args.top, "h")
     bars = ax4.barh(
-        range(len(top)), top["h"].values,
+        range(len(top)),
+        top["h"].values,
         color=cmap(norm(top["h"].values)),
-        edgecolor="black", linewidth=0.3
+        edgecolor="black",
+        linewidth=0.3,
     )
     ax4.set_yticks(range(len(top)))
     ax4.set_yticklabels([f"#{i}" for i in top["id"].values], fontsize=7)
@@ -191,11 +231,13 @@ def plot_trees(gdf, gdf_crowns, cdsm_data, cdsm_extent, args):
     ax4.invert_yaxis()
 
     # Encart statistiques
-    area_ha = (gdf["x"].max() - gdf["x"].min()) * (gdf["y"].max() - gdf["y"].min()) / 10000
+    area_ha = (
+        (gdf["x"].max() - gdf["x"].min()) * (gdf["y"].max() - gdf["y"].min()) / 10000
+    )
     stats_text = (
         f"Arbres : {len(gdf)}\n"
         f"Surface : {area_ha:.1f} ha\n"
-        f"Densité : {len(gdf)/max(area_ha,0.01):.0f} /ha\n"
+        f"Densité : {len(gdf) / max(area_ha, 0.01):.0f} /ha\n"
         f"H min : {gdf['h'].min():.1f} m\n"
         f"H moy : {gdf['h'].mean():.1f} m\n"
         f"H méd : {gdf['h'].median():.1f} m\n"
@@ -204,11 +246,15 @@ def plot_trees(gdf, gdf_crowns, cdsm_data, cdsm_extent, args):
         f"Surf moy : {gdf['surface'].mean():.1f} m²"
     )
     ax4.text(
-        0.95, 0.95, stats_text,
-        transform=ax4.transAxes, fontsize=9,
-        verticalalignment="top", horizontalalignment="right",
+        0.95,
+        0.95,
+        stats_text,
+        transform=ax4.transAxes,
+        fontsize=9,
+        verticalalignment="top",
+        horizontalalignment="right",
         bbox=dict(boxstyle="round,pad=0.5", facecolor="lightyellow", alpha=0.9),
-        fontfamily="monospace"
+        fontfamily="monospace",
     )
 
     plt.tight_layout()
@@ -221,12 +267,22 @@ def plot_trees(gdf, gdf_crowns, cdsm_data, cdsm_extent, args):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Visualisation des arbres détectés par lidartree")
+    parser = argparse.ArgumentParser(
+        description="Visualisation des arbres détectés par lidartree"
+    )
     parser.add_argument("csv", help="Fichier CSV des arbres (arbres_detectes.csv)")
-    parser.add_argument("tif", nargs="?", default=None, help="CDSM GeoTIFF pour le fond (optionnel)")
-    parser.add_argument("--hmin", type=float, default=None, help="Hauteur minimale à afficher (m)")
-    parser.add_argument("--top", type=int, default=20, help="Nombre d'arbres dans le top (défaut: 20)")
-    parser.add_argument("--save", type=str, default=None, help="Sauvegarder la figure (ex: carte.png)")
+    parser.add_argument(
+        "tif", nargs="?", default=None, help="CDSM GeoTIFF pour le fond (optionnel)"
+    )
+    parser.add_argument(
+        "--hmin", type=float, default=None, help="Hauteur minimale à afficher (m)"
+    )
+    parser.add_argument(
+        "--top", type=int, default=20, help="Nombre d'arbres dans le top (défaut: 20)"
+    )
+    parser.add_argument(
+        "--save", type=str, default=None, help="Sauvegarder la figure (ex: carte.png)"
+    )
     args = parser.parse_args()
 
     print("══════════════════════════════════════════════════")

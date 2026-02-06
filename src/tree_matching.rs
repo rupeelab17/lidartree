@@ -1,7 +1,7 @@
 //! Tree matching & evaluation — transpiled from lidaRtRee R source.
 //!
 //! Direct Rust port of `tree_matching()`, `hist_detection()`, and
-//! `height_regression()`.
+//! `height_regression()`. R arguments: `delta_ground`, `h_prec` (tree_matching).
 
 // ---------------------------------------------------------------------------
 // Types
